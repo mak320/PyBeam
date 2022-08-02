@@ -1,0 +1,762 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.colors as colors
+
+plt.style.use(['science', 'notebook', 'grid'])
+
+l_d = 4.7
+rho_b = 1.65
+ang_b = np.pi / 8
+
+# ====================== Components ====================== #
+def DriftZone(L):
+    """Tranfer Matrix of an L long drift"""
+    return [{'TransMat': np.array([[1, L, 0],
+                                   [0, 1, 0],
+                                   [0, 0, 1]]),
+             'len': L
+             }]
+
+def ThinQuad(f):
+    """Transfer Matrix of a Quadrupole with a focal length f"""
+    return [{'TransMat': np.array([[1, 0, 0],
+                                   [-1/f, 1, 0],
+                                   [0, 0, 1]]),
+             'len': 0
+             }]
+
+def Dip(rho, L):
+    """Transfer Matrix for a Sector Dipole, with bending radius rho and length L"""
+    return [{'TransMat': np.array([[np.cos(L/rho), rho*np.sin(L/rho), rho*(1-np.cos(L/rho))],
+                                   [-np.sin(L/rho), np.cos(L/rho), np.sin(L/rho)],
+                                   [0, 0, 1]]),
+             'len' : L
+            }]
+
+def Quad(k, L):
+    """Quadrupole magnet with quad gradient k and lenght L
+        k >= 0 --> Focusing
+        k < 0 --> Defocusing
+    """
+    omega = np.sqrt(np.abs(k))
+    if k >= 0:
+        return [{'TransMat': np.array([[np.cos(omega * L), 1 / omega * np.sin(omega * L), 0],
+                                       [-omega * np.sin(omega * L), np.cos(omega * L), 0],
+                                       [0, 0, 1]]),
+                 'len': L
+                 }]
+
+    else:
+        return [{'TransMat': np.array([[np.cosh(omega * L), 1 / omega * np.sinh(omega * L), 0],
+                                       [-omega * np.sinh(omega * L), np.cosh(omega * L), 0],
+                                       [0, 0, 1]]),
+                 'len': L
+                 }]
+
+def BendingMag(k, rho, ang, PoB):
+    """Combined function magnet consisting of Dipole and quadrupole modes
+    Bending radius rho, quad gradient k, which bends the reference trajectory by an angle ang
+    The dipole component only acts in the plane of bending
+    """
+    L = rho * ang
+
+    if PoB:
+        k = k + 1/rho**2
+        omega =  np.sqrt(np.abs(k))
+        if k > 0:
+            return [{'TransMat': np.array([[np.cos(omega * L), 1 / omega * np.sin(omega * L), (1 - np.cos(omega*L))/(rho * omega**2)],
+                                            [-omega * np.sin(omega * L), np.cos(omega * L), np.sin(omega * L)/(rho * omega)],
+                                            [0, 0, 1]]),
+                      'len': L
+                  }]
+        else:
+            return [{'TransMat': np.array([[np.cosh(omega * L), 1 / omega * np.sinh(omega * L), (1 - np.cos(omega * L)) / (rho * omega ** 2)],
+                                           [omega * np.sinh(omega * L), np.cosh(omega * L), np.sin(omega * L) / (rho * omega)],
+                                           [0, 0, 1]]),
+                     'len': L
+                     }]
+
+    else:
+        k = -k
+        omega = np.sqrt(np.abs(k))
+        if k > 0:
+            return [{'TransMat': np.array([[np.cos(omega * L), 1 / omega * np.sin(omega * L), 0],
+                                           [-omega * np.sin(omega * L), np.cos(omega * L), 0],
+                                           [0, 0, 1]]),
+                     'len': L
+                     }]
+        else:
+            return [{'TransMat': np.array([[np.cosh(omega * L), 1 / omega * np.sinh(omega * L), 0],
+                                           [omega * np.sinh(omega * L), np.cosh(omega * L), 0],
+                                           [0, 0, 1]]),
+                     'len': L
+                     }]
+
+# ====================== Functionalities ====================== #
+def Beamline(k1, k2,NStep = 1):
+    # ====================== Global Parameters ====================== #
+    l_d = 4.7
+    rho_b = 1.65
+    ang_b = np.pi / 8
+
+    # ====================== Beamline Design ====================== #
+    Beamline_horiz = DriftZone(l_d/ NStep)* NStep+ \
+                     BendingMag(k1, rho_b, ang_b/NStep, PoB=True) * NStep + \
+                     BendingMag(k2, rho_b, ang_b/NStep, PoB=True) * NStep + \
+                     BendingMag(k2, rho_b, ang_b/NStep, PoB=True) * NStep + \
+                     BendingMag(k1, rho_b, ang_b/NStep, PoB=True) * NStep
+
+    Beamline_vert =DriftZone(l_d/NStep) * NStep + \
+                     BendingMag(k1, rho_b, ang_b/NStep, PoB= False) * NStep + \
+                     BendingMag(k2, rho_b, ang_b/NStep, PoB= False) * NStep + \
+                     BendingMag(k2, rho_b, ang_b/NStep, PoB= False) * NStep + \
+                     BendingMag(k1, rho_b, ang_b/NStep, PoB= False) * NStep
+
+    return {'horiz': Beamline_horiz, 'vert': Beamline_vert}
+
+def EffTransMat(beamline):
+    """Multiplies component transfer matricies in order to get Effective Transfer Matrix"""
+    EffT = np.eye(beamline[0]['TransMat'].shape[0])
+    Len = 0
+    for component in beamline[-1::-1]: #revese beamline since matrix multiplication acts for the right
+        EffT = EffT @ component['TransMat']
+        Len = Len + component['len']
+    return {'TransMat': EffT, 'len': Len}
+
+def transportParticles(x0, beamline):
+    trans_coords = [x0]
+    s = [0]
+    for component in beamline:
+        trans_coords.append(component['TransMat'] @ trans_coords[-1])
+        s.append(s[-1] + component['len'])
+    trans_coords = np.array(trans_coords).transpose()
+    return {'x': trans_coords[:, 0, :].T,
+            'p_x': trans_coords[:, 1, :].T,
+            's': np.array(s)}
+
+def twiss_inv(beamline, ret_tune = False):
+    OTM = EffTransMat(beamline)
+    R = OTM['TransMat']
+    psi = np.arccos((R[0, 0]+R[1, 1])/2)
+    if (R[0, 1]<0):
+        psi = 2*np.pi-psi
+    Q = psi/(2*np.pi)
+    beta = (R[0, 1]) / np.sin(psi)
+    alpha = (R[0, 0] - R[1, 1])/(2*np.sin(psi))
+    gamma = (1 + alpha**2)/beta
+    if ret_tune:
+        return np.array([[beta, -alpha], [-alpha, gamma]]), Q
+    else:
+        return np.array([[beta, -alpha], [-alpha, gamma]])
+
+def update_twiss (A0 , beamline):
+    """ Transport the sigma matrix along the beamline """
+    Ai = [A0]
+    s = [0]
+
+    for component in beamline:
+        R_comp = np.array([[component['TransMat'][0, 0], component['TransMat'][0, 1]],
+                           [component['TransMat'][1, 0], component['TransMat'][1, 1]]])
+        Ai.append(R_comp @ Ai[-1] @ R_comp.transpose())
+        s.append(s[-1] + component['len'])
+    Ai =np.array(Ai).transpose()
+    return {'beta': Ai[0][0],
+            'alpha01': Ai[0][1],
+            'alpha10': Ai[1][0],  # equal to alpha-new01
+            'gamma': Ai[1][1],
+            's': np. array(s),
+            'Ai': Ai}
+
+
+def dispersion(beamline):
+    '''Takes in a beamline and calculates the dispersion as a function of pathlength travelled along the beamline'''
+    if not (isinstance(beamline, list)):
+        raise TypeError("beamline must be of type list, make sure to use 'horiz'/'vert' key!")
+
+    OTM = EffTransMat(beamline)
+    R = OTM['TransMat']
+
+    M = np.array([[1 - R[1, 1], R[0, 1]],
+                  [R[1, 0], 1 - R[0, 0]]])
+
+    Dvec = np.array([R[0, 2], R[1, 2]])
+
+    disper0 = 1 / np.linalg.det(M) * M.dot(Dvec)
+
+    disper0 = np.append(disper0, [1])
+
+    disper_arr = [disper0]
+    s_arr = [0]
+    for component in beamline:
+        s_arr.append(s_arr[-1] + component['len'])
+        disper_arr.append(component['TransMat'] @ disper_arr[-1])
+
+    disp_arr = np.array(disper_arr)
+
+    eta = disp_arr[:, 0]
+    etaPr = disp_arr[:, 1]
+
+    return {'eta': eta, 'etaPr': etaPr, 's': s_arr}
+
+
+def ScanStability(lim_k1, lim_k2, N = 400):
+    k1s = np.linspace(-lim_k1, lim_k1, N)
+    k2s = np.linspace(-lim_k2, lim_k2, N )[-1::-1]
+
+    k1s = k1s[k1s != 0]
+    k2s = k2s[k2s != 0]
+
+    K1, K2 = np.meshgrid(k1s, k2s)
+
+    Trace_horiz = np.zeros((N,N))
+    Trace_vert = np.zeros((N, N))
+
+    for i2 in range(N):
+        for i1 in range(N):
+
+            k1 = k1s[i1]
+            k2 = k2s[i2]
+
+            Beamline_horiz = Beamline(k1, k2)['horiz']
+
+            Beamline_horiz = Beamline_horiz * 4
+
+            OTM_horiz = EffTransMat(Beamline_horiz)['TransMat']
+
+            Beamline_vert = Beamline(k1, k2)['vert']
+
+            Beamline_vert = Beamline_vert * 4
+
+            OTM_vert = EffTransMat(Beamline_vert)['TransMat']
+
+            Trace_horiz[i2, i1] = OTM_horiz[0, 0] + OTM_horiz[1, 1]
+            Trace_vert[i2, i1] = OTM_vert[0, 0] + OTM_vert[1, 1]
+
+    fig = plt.figure('Stability')
+    ax = fig.add_subplot(111)
+
+    cs_horiz = ax.contour(K1, K2, Trace_horiz, levels=[-2, 2], linestyles=['solid', 'solid'], colors='red', linewidths=0.75)
+    ax.clabel(cs_horiz)
+
+    cs_vert = ax.contour(K1, K2, Trace_vert, levels=[-2, 2], linestyles=['solid', 'solid'], colors='blue', linewidths=0.75)
+    ax.clabel(cs_vert)
+
+    stale_horiz = np.abs(Trace_horiz) < 2
+    stale_vert = np.abs(Trace_vert) < 2
+
+    stable = np.logical_and(stale_horiz, stale_vert)
+    stable = stable.astype(int)
+
+    ax.contourf(K1, K2, stable, levels=[0, 0.5, 1.5], colors=[(0, 0, 0, 0), (0, 128, 0, 0.5)])
+
+    ax.set_xlabel(r'$k_1$')
+    ax.set_ylabel(r'$k_2$')
+
+    ax.hlines(y=[0, -1/rho_b**2], xmin=-lim_k1, xmax=lim_k1, colors='gray', linestyles=['solid', 'dashed'], linewidths=1)
+    ax.vlines(x=[0, -1 / rho_b ** 2], ymin=-lim_k2, ymax=lim_k2, colors='gray', linestyles=['solid', 'dashed'], linewidths=1)
+
+
+    plt.show()
+
+    return Trace_horiz, Trace_vert
+
+def ScanBetaMax(lim_k1, lim_k2, N = 400, interpolate = False):
+
+    k1s = np.linspace(-lim_k1, lim_k1, N)
+    k2s = np.linspace(-lim_k2, lim_k2, N)[-1::-1]
+
+    k1s = k1s[k1s != 0]
+    k2s = k2s[k2s != 0]
+
+    K1, K2 = np.meshgrid(k1s, k2s)
+
+    Trace_horiz = np.zeros((N, N))
+    Trace_vert = np.zeros((N, N))
+
+    BetaMax_horiz = np.zeros((N, N))
+    BetaMax_vert = np.zeros((N, N))
+
+
+    for i2 in range(N):
+        for i1 in range(N):
+            k1 = k1s[i1]
+            k2 = k2s[i2]
+
+            Beamline_horiz =Beamline(k1, k2)['horiz']
+
+            Beamline_horiz = Beamline_horiz * 4
+
+            OTM_horiz = EffTransMat(Beamline_horiz)['TransMat']
+
+            Beamline_vert = Beamline(k1, k2)['vert']
+
+            Beamline_vert = Beamline_vert * 4
+
+            OTM_vert = EffTransMat(Beamline_vert)['TransMat']
+
+            Trace_horiz[i2, i1] = OTM_horiz[0, 0] + OTM_horiz[1, 1]
+            Trace_vert[i2, i1] = OTM_vert[0, 0] + OTM_vert[1, 1]
+
+            stable_horiz = (np.abs(OTM_horiz[0, 0] + OTM_horiz[1, 1]) < 2)
+            stable_vert = (np.abs(OTM_vert[0, 0] + OTM_vert[1, 1]) < 2)
+
+            stable = np.logical_and(stable_horiz, stable_vert)
+
+            if stable:
+                twissMat0X, Q_X = twiss_inv(Beamline_horiz*4)
+                twissMat0Y, Q_Y = twiss_inv(Beamline_vert*4)
+
+
+
+                BetaMax_horiz[i2, i1] = np.max(np.abs(update_twiss(twissMat0X, Beamline_horiz)['beta']))
+                BetaMax_vert[i2, i1] = np.max(np.abs(update_twiss(twissMat0Y, Beamline_vert)['beta']))
+
+            else:
+                BetaMax_horiz[i2, i1] = np.inf
+                BetaMax_vert[i2, i1] = np.inf
+
+
+
+    BetaMax = np.fmax(BetaMax_horiz, BetaMax_vert)
+
+    fig, axes = plt.subplot_mosaic([['left', 'right'], ['bottom', 'bottom']], constrained_layout=True)
+
+    axes['left'].contourf(K1, K2, np.log(BetaMax_horiz), levels=150, vmax=4.5, cmap='turbo')
+    axes['right'].contourf(K1, K2, np.log(BetaMax_vert), levels=150, vmax=4.5, cmap='turbo')
+
+    c = axes['bottom'].contourf(K1, K2, np.log(BetaMax), levels=150, vmax=4.5, cmap='turbo')
+    cb = fig.colorbar(c, label=r'$\ln(Max[|\beta(s)|])$')
+
+    lev1x = axes['left'].contour(K1, K2, Trace_horiz, levels=[-2, 2], linestyles=['solid', 'solid'], colors='red', linewidths = 0.75)
+    axes['left'].clabel(lev1x)
+    lev1y = axes['left'].contour(K1, K2, Trace_vert, levels=[-2, 2], linestyles=['solid', 'solid'], colors='blue', linewidths = 0.75)
+    axes['left'].clabel(lev1y)
+
+    lev2x = axes['right'].contour(K1, K2, Trace_horiz, levels=[-2, 2], linestyles=['solid', 'solid'], colors='red', linewidths= 0.75)
+    axes['right'].clabel(lev2x)
+    lev1y = axes['right'].contour(K1, K2, Trace_vert, levels=[-2, 2], linestyles=['solid', 'solid'], colors='blue', linewidths= 0.75)
+    axes['right'].clabel(lev1y)
+
+    lev3x = axes['bottom'].contour(K1, K2, Trace_horiz, levels=[-2, 2], linestyles=['solid', 'solid'], colors='red', linewidths= 0.75)
+    axes['bottom'].clabel(lev3x)
+    lev1y = axes['bottom'].contour(K1, K2, Trace_vert, levels=[-2, 2], linestyles=['solid', 'solid'], colors='blue', linewidths= 0.75)
+    axes['bottom'].clabel(lev1y)
+
+    for ax in ['left', 'right', 'bottom']:
+        # guide lines
+        axes[ax].hlines(y=[0, -1/rho_b**2], xmin=np.min(k1s), xmax=np.max(k1s), linestyles=['solid', 'dashed'],
+                        colors='gray', linewidths=1)
+
+        axes[ax].vlines(x=[0, -1/rho_b**2], ymin=np.min(k2s), ymax=np.max(k2s),  linestyles=['solid', 'dashed'],
+                        colors='gray', linewidths=0.5)
+
+        # axis labels
+        axes[ax].set_xlabel(r'$k_1$')
+        axes[ax].set_ylabel(r'$k_2$')
+
+    # title
+    axes['left'].set_title('Horizontal Plane')
+    axes['right'].set_title('Vertical Plane')
+    axes['bottom'].set_xlabel('Max from both planes')
+
+    # finding and plotting global minima
+    def find_min_idx(x):
+        k = x.argmin()
+        ncol = x.shape[1]
+        return int(k / ncol), k % ncol
+
+    GMinBetaX = np.array([
+        k1s[find_min_idx(BetaMax_horiz)[1]],
+        k2s[find_min_idx(BetaMax_horiz)[0]]
+    ])
+
+    GMinBetaY = np.array([
+        k1s[find_min_idx(BetaMax_vert)[1]],
+        k2s[find_min_idx(BetaMax_vert)[0]]
+    ])
+    GMinBeta = np.array([
+        k1s[find_min_idx(BetaMax)[1]],
+        k2s[find_min_idx(BetaMax)[0]]
+    ])
+
+
+    print(r'Global Min of Max[|beta_x|]: (k1, k2) = (%.3f, %.3f)' % (GMinBetaX[0], GMinBetaX[1]))
+    print(r'Global Min of Max[|beta_y|]: (k1, k2) = (%.3f, %.3f)' % (GMinBetaY[0], GMinBetaY[1]))
+    print(r'Global Min of Max[|beta|]: (k1, k2) = (%.3f, %.3f)' % (GMinBeta[0], GMinBeta[1]))
+
+    axes['left'].scatter(x=GMinBetaX[0], y=GMinBetaX[1], marker='*', s= 50, c='orange')
+    axes['right'].scatter(x=GMinBetaY[0], y=GMinBetaY[1], marker='*', s=50, c='orange')
+    axes['bottom'].scatter(x=GMinBeta[0], y=GMinBeta[1], marker='*', s=50, c='orange')
+
+    plt.show()
+
+
+    if interpolate:
+        InterpSteps = 10
+        linemark = '-'
+    else:
+        InterpSteps = 1
+        linemark= 'o-'
+
+    A0X_horiz = twiss_inv(Beamline(GMinBetaX[0], GMinBetaX[1], NStep=InterpSteps)['horiz'])
+    A0X_vert = twiss_inv(Beamline(GMinBetaX[0], GMinBetaX[1], NStep=InterpSteps)['vert'])
+    GMinBetaFuncX_horiz = update_twiss(A0X_horiz, Beamline(GMinBetaX[0], GMinBetaX[1], NStep=InterpSteps)['horiz']*4)
+    GMinBetaFuncX_vert = update_twiss(A0X_vert, Beamline(GMinBetaX[0], GMinBetaX[1], NStep=InterpSteps)['vert']*4)
+
+    A0Y_horiz = twiss_inv(Beamline(GMinBetaY[0], GMinBetaY[1], NStep=InterpSteps)['horiz'])
+    A0Y_vert = twiss_inv(Beamline(GMinBetaY[0], GMinBetaY[1], NStep=InterpSteps)['vert'])
+    GMinBetaFuncY_horiz = update_twiss(A0Y_horiz, Beamline(GMinBetaY[0], GMinBetaY[1], NStep=InterpSteps)['horiz']*4)
+    GMinBetaFuncY_vert = update_twiss(A0Y_vert, Beamline(GMinBetaY[0], GMinBetaY[1], NStep=InterpSteps)['vert']*4)
+
+    A0both_horiz = twiss_inv(Beamline(GMinBeta[0], GMinBeta[1], NStep=InterpSteps)['horiz'])
+    A0both_vert = twiss_inv(Beamline(GMinBeta[0], GMinBeta[1], NStep=InterpSteps)['vert'])
+    GMinBetaFunc_horiz = update_twiss(A0both_horiz, Beamline(GMinBeta[0], GMinBeta[1], NStep=InterpSteps)['horiz']*4)
+    GMinBetaFunc_vert = update_twiss(A0both_vert, Beamline(GMinBeta[0], GMinBeta[1], NStep=InterpSteps)['vert']*4)
+
+    figu = plt.figure('BetaFunc_GlobMin')
+    axi1 = figu.add_subplot(311)
+    axi2 = figu.add_subplot(312)
+    axi3 = figu.add_subplot(313)
+
+    axi1.plot(GMinBetaFuncX_horiz['s'], np.abs(GMinBetaFuncX_horiz['beta']), linemark,
+              label=r'$|\beta_x(s)|$, at $(k_1, k_2) = (%.3f, %.3f)$' % (GMinBetaX[0], GMinBetaX[1]), c='red')
+    axi1.plot(GMinBetaFuncX_vert['s'], np.abs(GMinBetaFuncX_vert['beta']), linemark,
+              label=r'$|\beta_y(s)|$, at $(k_1, k_2) = (%.3f, %.3f)$' % (GMinBetaX[0], GMinBetaX[1]), c='blue')
+
+    axi2.plot(GMinBetaFuncY_horiz['s'], np.abs(GMinBetaFuncY_horiz['beta']), linemark,
+              label = r'$|\beta_x(s)|$, at $(k_1, k_2) = (%.3f, %.3f)$' % (GMinBetaY[0], GMinBetaY[1]), c='red')
+    axi2.plot(GMinBetaFuncY_vert['s'], np.abs(GMinBetaFuncY_vert['beta']), linemark,
+              label=r'$|\beta_y(s)|$, at $(k_1, k_2) = (%.3f, %.3f)$' % (GMinBetaY[0], GMinBetaY[1]), c='blue')
+
+    axi3.plot(GMinBetaFunc_horiz['s'], np.abs(GMinBetaFunc_horiz['beta']), linemark,
+              label = r'$|\beta_x(s)|$, at $(k_1, k_2) = (%.3f, %.3f)$' % (GMinBeta[0], GMinBeta[1]), c='red')
+    axi3.plot(GMinBetaFunc_vert['s'], np.abs(GMinBetaFunc_vert['beta']), linemark,
+              label = r'$|\beta_y(s)|$, at $(k_1, k_2) = (%.3f, %.3f)$' % (GMinBeta[0], GMinBeta[1]), c='blue')
+
+    for ax in [axi1, axi2, axi3]:
+
+        ax.legend(loc = 'best', fontsize = 12)
+
+    axi3.set_xlabel(r'$s\ [m]$')
+
+
+
+    plt.show()
+    return BetaMax_horiz, BetaMax_vert, BetaMax
+
+def ScanTune(lim_k1, lim_k2, N=200):
+    k1s = np.linspace(-lim_k1, lim_k1, N)
+    k2s = np.linspace(-lim_k2, lim_k2, N)[-1::-1]
+
+    k1s = k1s[k1s != 0]
+    k2s = k2s[k2s != 0]
+
+    K1, K2 = np.meshgrid(k1s, k2s)
+
+    Trace_horiz = np.zeros((N, N))
+    Trace_vert = np.zeros((N, N))
+
+    Qarr_horiz = np.zeros((N, N))
+    Qarr_vert = np.zeros((N, N))
+
+    for i2 in range(N):
+        for i1 in range(N):
+            k1 = k1s[i1]
+            k2 = k2s[i2]
+
+            Beamline_horiz = Beamline(k1, k2)['horiz']
+
+            Beamline_horiz = Beamline_horiz
+
+            OTM_horiz = EffTransMat(Beamline_horiz)['TransMat']
+
+            Beamline_vert = Beamline(k1, k2)['vert']
+
+            Beamline_vert = Beamline_vert
+
+            OTM_vert = EffTransMat(Beamline_vert)['TransMat']
+
+            Trace_horiz[i2, i1] = OTM_horiz[0, 0] + OTM_horiz[1, 1]
+            Trace_vert[i2, i1] = OTM_vert[0, 0] + OTM_vert[1, 1]
+
+            stable_horiz = (np.abs( OTM_horiz[0, 0] + OTM_horiz[1, 1]) < 2)
+            stable_vert = (np.abs(OTM_vert[0, 0] + OTM_vert[1, 1]) < 2)
+
+            stable = np.logical_and(stable_horiz, stable_vert)
+
+            if stable:
+                Q_X = twiss_inv(Beamline_horiz*4, ret_tune=True)[1]
+                Q_Y = twiss_inv(Beamline_vert*4, ret_tune=True)[1]
+
+                Qarr_horiz[i2, i1] = Q_X
+                Qarr_vert[i2, i1] = Q_Y
+
+            else:
+                Qarr_horiz[i2, i1] = 0
+                Qarr_vert[i2, i1] = 0
+
+    fig, axes = plt.subplot_mosaic([['left', 'right'], ['left', 'right']], constrained_layout=True)
+
+    axes['left'].contourf(K1, K2, Qarr_horiz, levels=150, vmax=1, cmap='binary')
+    c = axes['right'].contourf(K1, K2, Qarr_vert, levels=150, vmax=1, cmap='binary')
+    cb = fig.colorbar(c, label=r'$Q$')
+
+    lev1x = axes['left'].contour(K1, K2, Trace_horiz, levels=[-2, 2], linestyles=['solid', 'solid'], colors='red',
+                                 linewidths=0.75)
+    axes['left'].clabel(lev1x)
+    lev1y = axes['left'].contour(K1, K2, Trace_vert, levels=[-2, 2], linestyles=['solid', 'solid'], colors='blue',
+                                 linewidths=0.75)
+    axes['left'].clabel(lev1y)
+
+    lev2x = axes['right'].contour(K1, K2, Trace_horiz, levels=[-2, 2], linestyles=['solid', 'solid'], colors='red',
+                                  linewidths=0.75)
+    axes['right'].clabel(lev2x)
+    lev1y = axes['right'].contour(K1, K2, Trace_vert, levels=[-2, 2], linestyles=['solid', 'solid'], colors='blue',
+                                  linewidths=0.75)
+    axes['right'].clabel(lev1y)
+
+    for ax in ['left', 'right']:
+        # guide lines
+        axes[ax].hlines(y=0, xmin=np.min(k1s), xmax=np.max(k1s), colors='black', linewidths=0.75)
+        axes[ax].hlines(y=-1 / rho_b ** 2, xmin=np.min(k1s), xmax=np.max(k1s), colors='black', linewidths=0.75)
+        axes[ax].vlines(x=0, ymin=np.min(k2s), ymax=np.max(k2s), colors='black', linewidths=0.75)
+        axes[ax].vlines(x=-1 / rho_b ** 2, ymin=np.min(k2s), ymax=np.max(k2s), colors='black', linewidths=0.75)
+        # axis labels
+        axes[ax].set_xlabel(r'$k_1$')
+        axes[ax].set_ylabel(r'$k_2$')
+
+    plt.show()
+
+def Beta_and_DispersionFunc(k1, k2, interpolate = False, secOnly=False):
+
+    if interpolate:
+        InterpSteps = 10
+        linemark = '-'
+    else:
+        InterpSteps = 1
+        linemark= 'o-'
+
+    Beamline_horiz = Beamline(k1, k2, NStep=InterpSteps)['horiz']
+
+    Beamline_vert = Beamline(k1, k2, NStep=InterpSteps)['vert']
+
+    if secOnly:
+        Nsec = 1
+    else:
+        Nsec = 4
+
+    disper = dispersion(Beamline_horiz*Nsec)
+
+    twissMat0X = twiss_inv(Beamline_horiz*Nsec)
+    twissMat0Y = twiss_inv(Beamline_vert*Nsec)
+
+    Twiss_horiz = update_twiss(twissMat0X, Beamline_horiz*Nsec)
+    Twiss_vert = update_twiss(twissMat0Y, Beamline_vert*Nsec)
+
+    fig = plt.figure('Beta_andDispersion:(k1,k2)=(%.3f, %.3f)'%(k1, k2))
+    ax = fig.add_subplot(111)
+
+    ax.plot(Twiss_horiz['s'], np.abs(Twiss_horiz['beta']), linemark, label=r'$|\beta_x(s)|$', c='red')
+    ax.plot(Twiss_vert['s'], np.abs(Twiss_vert['beta']), linemark, label=r'$|\beta_y(s)|$', c='blue')
+    ax.plot(disper['s'], disper['eta'], linemark, label= r'$\eta_x(s)$', c='green')
+    ax.legend(loc= 'upper left')
+    ax.set_xlabel(r'$s$')
+
+
+    plt.show()
+
+def ScanBeamsize(lim_k1, lim_k2, N = 400, interpolate = False):
+
+    emittance= 4e-4
+    momentum_error = 1e-3
+
+    k1s = np.linspace(-lim_k1, lim_k1, N)
+    k2s = np.linspace(-lim_k2, lim_k2, N)[-1::-1]
+
+    k1s = k1s[k1s != 0]
+    k2s = k2s[k2s != 0]
+
+    K1, K2 = np.meshgrid(k1s, k2s)
+
+    Trace_horiz = np.zeros((N, N))
+    Trace_vert = np.zeros((N, N))
+
+    MaxBeamsize_horiz = np.zeros((N, N))
+    MaxBeamsize_vert = np.zeros((N, N))
+
+    for i2 in range(N):
+        for i1 in range(N):
+            k1 = k1s[i1]
+            k2 = k2s[i2]
+
+            Beamline_horiz = Beamline(k1, k2)['horiz']
+            Beamline_horiz = Beamline_horiz * 4
+            OTM_horiz = EffTransMat(Beamline_horiz)['TransMat']
+
+            Beamline_vert = Beamline(k1, k2)['vert']
+            Beamline_vert = Beamline_vert * 4
+            OTM_vert = EffTransMat(Beamline_vert)['TransMat']
+
+            Trace_horiz[i2, i1] = OTM_horiz[0, 0] + OTM_horiz[1, 1]
+            Trace_vert[i2, i1] = OTM_vert[0, 0] + OTM_vert[1, 1]
+
+            stable_horiz = (np.abs(OTM_horiz[0, 0] + OTM_horiz[1, 1]) < 2)
+            stable_vert = (np.abs(OTM_vert[0, 0] + OTM_vert[1, 1]) < 2)
+
+            stable = np.logical_and(stable_horiz, stable_vert)
+
+            if stable:
+                twissMat0X, Q_X = twiss_inv(Beamline_horiz * 4)
+                twissMat0Y, Q_Y = twiss_inv(Beamline_vert * 4)
+
+                MaxBeta_horiz = np.max(np.abs(update_twiss(twissMat0X, Beamline_horiz)['beta']))
+                MaxBeta_vert = np.max(np.abs(update_twiss(twissMat0Y, Beamline_vert)['beta']))
+
+                MaxDisper_horiz = np.max(dispersion(Beamline_horiz)['eta'])
+                MaxDisper_vert = np.max(dispersion(Beamline_vert)['eta'])
+
+                MaxBeamsize_horiz[i2, i1] = np.sqrt(emittance*MaxBeta_horiz + (MaxDisper_horiz*momentum_error)**2)
+                MaxBeamsize_vert[i2, i1] = np.sqrt(emittance*MaxBeta_vert +(MaxDisper_vert*momentum_error)**2)
+
+            else:
+                MaxBeamsize_horiz[i2, i1] = np.inf
+                MaxBeamsize_vert[i2, i1] = np.inf
+
+    MaxBeamsize = np.fmax(MaxBeamsize_horiz, MaxBeamsize_vert)
+
+    fig, axes = plt.subplot_mosaic([['left', 'right'], ['bottom', 'bottom']], constrained_layout=True)
+
+    axes['left'].pcolor(K1, K2, MaxBeamsize_horiz, cmap='turbo', shading='auto',
+                        norm=colors.LogNorm(vmin=np.min(MaxBeamsize), vmax=np.max(MaxBeamsize[MaxBeamsize != np.inf])))
+    axes['right'].pcolor(K1, K2, MaxBeamsize_vert, cmap='turbo', shading='auto',
+                        norm=colors.LogNorm(vmin=np.min(MaxBeamsize), vmax=np.max(MaxBeamsize[MaxBeamsize != np.inf])))
+    c = axes['bottom'].pcolor(K1, K2, MaxBeamsize, cmap='turbo', shading='auto',
+                        norm=colors.LogNorm(vmin=np.min(MaxBeamsize), vmax=np.max(MaxBeamsize[MaxBeamsize != np.inf])))
+    cb = fig.colorbar(c, label=r'$(Max[|\sigma(s)|]$')
+
+
+    lev1x = axes['left'].contour(K1, K2, Trace_horiz, levels=[-2, 2], linestyles=['solid', 'solid'], colors='red',
+                                 linewidths=0.75)
+    axes['left'].clabel(lev1x)
+    lev1y = axes['left'].contour(K1, K2, Trace_vert, levels=[-2, 2], linestyles=['solid', 'solid'], colors='blue',
+                                 linewidths=0.75)
+    axes['left'].clabel(lev1y)
+
+    lev2x = axes['right'].contour(K1, K2, Trace_horiz, levels=[-2, 2], linestyles=['solid', 'solid'], colors='red',
+                                  linewidths=0.75)
+    axes['right'].clabel(lev2x)
+    lev1y = axes['right'].contour(K1, K2, Trace_vert, levels=[-2, 2], linestyles=['solid', 'solid'], colors='blue',
+                                  linewidths=0.75)
+    axes['right'].clabel(lev1y)
+
+    lev3x = axes['bottom'].contour(K1, K2, Trace_horiz, levels=[-2, 2], linestyles=['solid', 'solid'], colors='red',
+                                   linewidths=0.75)
+    axes['bottom'].clabel(lev3x)
+    lev1y = axes['bottom'].contour(K1, K2, Trace_vert, levels=[-2, 2], linestyles=['solid', 'solid'], colors='blue',
+                                   linewidths=0.75)
+    axes['bottom'].clabel(lev1y)
+
+    for ax in ['left', 'right', 'bottom']:
+        # guide lines
+        axes[ax].hlines(y=[0, -1 / rho_b ** 2], xmin=np.min(k1s), xmax=np.max(k1s), linestyles=['solid', 'dashed'],
+                        colors='gray', linewidths=1)
+
+        axes[ax].vlines(x=[0, -1 / rho_b ** 2], ymin=np.min(k2s), ymax=np.max(k2s), linestyles=['solid', 'dashed'],
+                        colors='gray', linewidths=0.5)
+
+        # axis labels
+        axes[ax].set_xlabel(r'$k_1$')
+        axes[ax].set_ylabel(r'$k_2$')
+
+    # title
+    axes['left'].set_title('Horizontal Plane')
+    axes['right'].set_title('Vertical Plane')
+    axes['bottom'].set_xlabel('Max from both planes')
+
+    # finding and plotting global minima
+    def find_min_idx(x):
+        k = x.argmin()
+        ncol = x.shape[1]
+        return int(k / ncol), k % ncol
+
+    GMinBeamSizeX = np.array([k1s[find_min_idx(MaxBeamsize_horiz)[1]],
+                              k2s[find_min_idx(MaxBeamsize_horiz)[0]]])
+
+    GMinBeamSizeY = np.array([k1s[find_min_idx(MaxBeamsize_vert)[1]],
+                              k2s[find_min_idx(MaxBeamsize_vert)[0]]])
+
+    GMinBeamSize = np.array([k1s[find_min_idx(MaxBeamsize)[1]],
+                             k2s[find_min_idx(MaxBeamsize)[0]]])
+
+    print(r'Global Min of Max[|beta_x|]: (k1, k2) = (%.3f, %.3f)' % (GMinBeamSizeX[0], GMinBeamSizeX[1]))
+    print(r'Global Min of Max[|beta_y|]: (k1, k2) = (%.3f, %.3f)' % (GMinBeamSizeY[0], GMinBeamSizeY[1]))
+    print(r'Global Min of Max[|beta|]: (k1, k2) = (%.3f, %.3f)' % (GMinBeamSize[0], GMinBeamSize[1]))
+
+    axes['left'].scatter(x=GMinBeamSizeX[0], y=GMinBeamSizeX[1], marker='*', s=50, c='orange')
+    axes['right'].scatter(x=GMinBeamSizeY[0], y=GMinBeamSizeY[1], marker='*', s=50, c='orange')
+    axes['bottom'].scatter(x=GMinBeamSize[0], y=GMinBeamSize[1], marker='*', s=50, c='orange')
+
+    plt.show()
+
+    if interpolate:
+        InterpSteps = 10
+        linemark = '-'
+    else:
+        InterpSteps = 1
+        linemark = 'o-'
+
+    A0X_horiz = twiss_inv(Beamline(GMinBeamSizeX[0], GMinBeamSizeX[1], NStep=InterpSteps)['horiz'])
+    A0X_vert = twiss_inv(Beamline(GMinBeamSizeX[0], GMinBeamSizeX[1], NStep=InterpSteps)['vert'])
+    GMinBetaFuncX_horiz = update_twiss(A0X_horiz, Beamline(GMinBeamSizeX[0], GMinBeamSizeX[1], NStep=InterpSteps)['horiz'] * 4)
+    GMinBetaFuncX_vert = update_twiss(A0X_vert, Beamline(GMinBeamSizeX[0], GMinBeamSizeX[1], NStep=InterpSteps)['vert'] * 4)
+
+    A0Y_horiz = twiss_inv(Beamline(GMinBeamSizeY[0], GMinBeamSizeY[1], NStep=InterpSteps)['horiz'])
+    A0Y_vert = twiss_inv(Beamline(GMinBeamSizeY[0], GMinBeamSizeY[1], NStep=InterpSteps)['vert'])
+    GMinBetaFuncY_horiz = update_twiss(A0Y_horiz, Beamline(GMinBeamSizeY[0], GMinBeamSizeY[1], NStep=InterpSteps)['horiz'] * 4)
+    GMinBetaFuncY_vert = update_twiss(A0Y_vert, Beamline(GMinBeamSizeY[0], GMinBeamSizeY[1], NStep=InterpSteps)['vert'] * 4)
+
+    A0both_horiz = twiss_inv(Beamline(GMinBeamSize[0], GMinBeamSize[1], NStep=InterpSteps)['horiz'])
+    A0both_vert = twiss_inv(Beamline(GMinBeamSize[0], GMinBeamSize[1], NStep=InterpSteps)['vert'])
+    GMinBetaFunc_horiz = update_twiss(A0both_horiz, Beamline(GMinBeamSize[0], GMinBeamSize[1], NStep=InterpSteps)['horiz'] * 4)
+    GMinBetaFunc_vert = update_twiss(A0both_vert, Beamline(GMinBeamSize[0], GMinBeamSize[1], NStep=InterpSteps)['vert'] * 4)
+
+
+
+    figu = plt.figure('BetaFunc_GlobMin')
+    axi1 = figu.add_subplot(311)
+    axi2 = figu.add_subplot(312)
+    axi3 = figu.add_subplot(313)
+
+    axi1.plot(GMinBetaFuncX_horiz['s'], np.abs(GMinBetaFuncX_horiz['beta']), linemark,
+              label=r'$|\beta_x(s)|$, at $(k_1, k_2) = (%.3f, %.3f)$' % (GMinBeamSizeX[0], GMinBeamSizeX[1]), c='red')
+    axi1.plot(GMinBetaFuncX_vert['s'], np.abs(GMinBetaFuncX_vert['beta']), linemark,
+              label=r'$|\beta_y(s)|$, at $(k_1, k_2) = (%.3f, %.3f)$' % (GMinBeamSizeX[0], GMinBeamSizeX[1]), c='blue')
+
+    axi2.plot(GMinBetaFuncY_horiz['s'], np.abs(GMinBetaFuncY_horiz['beta']), linemark,
+              label=r'$|\beta_x(s)|$, at $(k_1, k_2) = (%.3f, %.3f)$' % (GMinBeamSizeY[0], GMinBeamSizeY[1]), c='red')
+    axi2.plot(GMinBetaFuncY_vert['s'], np.abs(GMinBetaFuncY_vert['beta']), linemark,
+              label=r'$|\beta_y(s)|$, at $(k_1, k_2) = (%.3f, %.3f)$' % (GMinBeamSizeY[0], GMinBeamSizeY[1]), c='blue')
+
+    axi3.plot(GMinBetaFunc_horiz['s'], np.abs(GMinBetaFunc_horiz['beta']), linemark,
+              label=r'$|\beta_x(s)|$, at $(k_1, k_2) = (%.3f, %.3f)$' % (GMinBeamSize[0], GMinBeamSize[1]), c='red')
+    axi3.plot(GMinBetaFunc_vert['s'], np.abs(GMinBetaFunc_vert['beta']), linemark,
+              label=r'$|\beta_y(s)|$, at $(k_1, k_2) = (%.3f, %.3f)$' % (GMinBeamSize[0], GMinBeamSize[1]), c='blue')
+
+    for ax in [axi1, axi2, axi3]:
+        ax.legend(loc='best', fontsize=12)
+
+    axi3.set_xlabel(r'$s\ [m]$')
+
+    plt.show()
+
+    return MaxBeamsize_horiz, MaxBeamsize_vert, MaxBeamsize
+
+
+
+
+
+ScanBeamsize(10, 10, 200)
+
+#ScanStability(7,7, 200)
+Beta_and_DispersionFunc(-0.738, 0.229, interpolate = True)
+
