@@ -10,6 +10,7 @@ plt.style.use(['science', 'notebook', 'grid'])
 K1, K2 = -0.129, -0.222  # 1/(meter^2)
 
 l_d = 4.7  # meter
+
 l_kicker = 0.3  # meter
 l_septum = 1  # meter
 rho_b = 1.65  # meter
@@ -17,14 +18,13 @@ Nsec = 3
 Nmag = 4
 ang_b = 2 * np.pi / (Nsec * Nmag)  # radian
 
+l_bend = 2 * np.pi / 3 * rho_b  # meter
+
 emittance = 4e-6  # meter radian
 momentum_err = 1e-4
 
 MinDistKS = 0.45  # Kicker-Septum minimal distance
 MinDistBS = 0.3  # Bending Section-Septum minimal distance
-
-
-
 
 # ====================== Components ====================== #
 
@@ -33,16 +33,14 @@ def DriftZone(L):
     """Transfer Matrix of an L long drift"""
     return [{'TransMat': np.array([[1, L],
                                    [0, 1]]),
-             'len': L
-             }]
+             'Len': L}]
 
 
 def ThinQuad(f):
     """Transfer Matrix of a Quadrupole with a focal length f"""
     return [{'TransMat': np.array([[1, 0],
                                    [-1 / f, 1]]),
-             'len': 0
-             }]
+             'Len': 0}]
 
 
 def Dip(rho, L, PoB):
@@ -51,12 +49,10 @@ def Dip(rho, L, PoB):
     if PoB:
         return [{'TransMat': np.array([[np.cos(L / rho), rho * np.sin(L / rho)],
                                        [-np.sin(L / rho), np.cos(L / rho)]]),
-                'len': L
-                }]
+                'Len': L}]
     else:
         return [{'TransMat': np.eye(2),
-                 'len': L
-                 }]
+                 'Len': L}]
 
 
 def Quad(k, L):
@@ -68,14 +64,12 @@ def Quad(k, L):
     if k >= 0:
         return [{'TransMat': np.array([[np.cos(omega * L), 1 / omega * np.sin(omega * L)],
                                        [-omega * np.sin(omega * L), np.cos(omega * L)]]),
-                 'len': L
-                 }]
+                 'Len': L}]
 
     else:
         return [{'TransMat': np.array([[np.cosh(omega * L), 1 / omega * np.sinh(omega * L)],
                                        [-omega * np.sinh(omega * L), np.cosh(omega * L)]]),
-                 'len': L
-                 }]
+                 'Len': L}]
 
 
 def BendingMag(k, rho, ang, PoB):
@@ -91,31 +85,25 @@ def BendingMag(k, rho, ang, PoB):
         if k > 0:
             return [{'TransMat': np.array([[np.cos(omega * L), 1 / omega * np.sin(omega * L)],
                                            [-omega * np.sin(omega * L), np.cos(omega * L)]]),
-                'len': L
-            }]
+                     'Len': L}]
         else:
             return [{'TransMat': np.array([[np.cosh(omega * L), 1 / omega * np.sinh(omega * L)],
                                            [omega * np.sinh(omega * L), np.cosh(omega * L)]]),
-                'len': L
-            }]
-
+                    'Len': L}]
     else:
         k = -k
         omega = np.sqrt(np.abs(k))
         if k > 0:
             return [{'TransMat': np.array([[np.cos(omega * L), 1 / omega * np.sin(omega * L)],
                                            [-omega * np.sin(omega * L), np.cos(omega * L)]]),
-                     'len': L
-                     }]
+                     'Len': L}]
         else:
             return [{'TransMat': np.array([[np.cosh(omega * L), 1 / omega * np.sinh(omega * L)],
                                            [omega * np.sinh(omega * L), np.cosh(omega * L)]]),
-                     'len': L
-                     }]
+                     'Len': L}]
 
 
 # ====================== Base Capability ====================== #
-
 
 def EffTransMat(beamline):
     """Multiplies component transfer matrices in order to get Effective Transfer Matrix"""
@@ -124,9 +112,88 @@ def EffTransMat(beamline):
     for component in beamline[-1::-1]:  # reverse beamline since matrix multiplication acts for the right
         EffT = EffT @ component['TransMat']
 
-        Tot_len = Tot_len + component['len']
+        Tot_len = Tot_len + component['Len']
 
-    return {'TransMat': EffT, 'len': Tot_len}
+    return {'TransMat': EffT,
+            's': Tot_len}
+
+
+def BeamMap(beamline):
+    """Given an arbitrary starting point the beam tells how far along the ring each component's
+    transmission matrix becomes active
+    :param beamline: Beam Line object, must be of type list."""
+    TransMat_arr = [np.eye(2)]
+    s_arr = [0]
+    for component in beamline:
+        s_arr.append(s_arr[-1] + component['Len'])
+        TransMat_arr.append(component['TransMat'] )
+    return {'TransMat': np.array(TransMat_arr),
+            's': np.array(s_arr)}
+
+
+def RunningTransMat(beamline):
+    beammap = BeamMap(beamline)
+    T = np.eye(2)
+    TransMat_arr = []
+    for comp_T in list(beammap['TransMat']):
+        T = comp_T @ T
+        TransMat_arr.append(T)
+    return {'TransMat': np.array(TransMat_arr),
+            's': beammap['s']}
+
+
+def TransMatBetweenPoints(s1, s2, beamline):
+    if s1 == s2:
+        return {'TransMat': np.array([np.eye(2)]),
+                's': np.array(s1)}
+    elif s1 > s2:
+        return {'TransMat': np.array([np.nan * np.ones((2, 2))]),
+                's': np.array(np.nan)}
+    else:
+        beammap = BeamMap(beamline)
+        mask = np.logical_and(s1 <= beammap['s'], s2 >= beammap['s'])
+        comp_T_between = beammap['TransMat'][mask]
+
+        s_arr = beammap['s'][mask]
+        T = np.eye(2)
+        TransMat_arr = []
+        for comp_T in comp_T_between:
+            T = comp_T @ T
+            TransMat_arr.append(T)
+        return {'TransMat': np.array(TransMat_arr),
+                's': s_arr}
+
+
+def TransportParticles(x0, beamline):
+    """Transports Particle, specified in one transverse plane by [x, x'] along the beamline made up of a series of
+    components with defined transfer matricies. The function returns arrays containting x(s), x'(s) and s"""
+
+    state = [x0]
+    s = [0]
+
+    for component in beamline:
+        state.append(component['TransMat'] @ state[-1])
+        s.append(s[-1] + component['Len'])
+    state = np.array(state).transpose()
+    return {'x': state[:, 0, :],
+            'px': state[:, 1, :],
+            's': s}
+
+
+def Point_to_Point_ParticleTransport(x0, s1, s2, beamline):
+    TransMat_between = TransMatBetweenPoints(s1, s2, beamline)['TransMat']
+    s_between = TransMatBetweenPoints(s1, s2, beamline)['s']
+
+    x_arr = []
+    px_arr = []
+
+    for comp_T in TransMat_between:
+        state = comp_T @ x0
+        x_arr.append(state[0, 0])
+        px_arr.append(state[1, 0])
+    return {'x': np.array(x_arr),
+            'px': np.array(px_arr),
+            's': s_between}
 
 
 def Twiss(beamline):
@@ -152,7 +219,7 @@ def Twiss(beamline):
                            [component['TransMat'][1, 0], component['TransMat'][1, 1]]])
         T_inv = np.linalg.inv(T_comp)
         Ai.append(T_inv.T @ Ai[-1] @ T_inv)
-        s.append(s[-1] + component['len'])
+        s.append(s[-1] + component['Len'])
     Ai = np.array(Ai).transpose()
 
     return {'gamma': Ai[0][0],
@@ -163,22 +230,6 @@ def Twiss(beamline):
             'TwissInv': A0}
 
 
-def TransportParticles(x0, beamline):
-    """Transports Particle, specified in one transverse plane by [x, x'] along the beamline made up of a series of
-    components with defined transfer matricies. The function returns arrays containting x(s), x'(s) and s"""
-
-    state = [x0]
-    s = [0]
-
-    for component in beamline:
-        state.append(component['TransMat'] @ state[-1])
-        s.append(s[-1] + component['len'])
-    state = np.array(state).transpose()
-    return {'x': state[:, 0, :],
-            'px': state[:, 1, :],
-            's': s}
-
-
 def GaussianBeam(mean_x, mean_px, sig_x, sig_px, Npar=1000, plot=False):
     beam = np.random.randn(2, Npar)
     beam[0, :] = sig_x * beam[0, :] + mean_x
@@ -187,39 +238,38 @@ def GaussianBeam(mean_x, mean_px, sig_x, sig_px, Npar=1000, plot=False):
 
 
 # ====================== Ring Characterization ====================== #
+def Beamline(horiz, Nstep=1):
+    if horiz:
+        beamline = DriftZone(l_d / Nstep) * Nstep + \
+                   BendingMag(K1, rho_b, ang_b / Nstep, PoB=True) * Nstep + \
+                   BendingMag(K2, rho_b, ang_b / Nstep, PoB=True) * Nstep + \
+                   BendingMag(K2, rho_b, ang_b / Nstep, PoB=True) * Nstep + \
+                   BendingMag(K1, rho_b, ang_b / Nstep, PoB=True) * Nstep
+
+        beamline = beamline * Nsec
+
+    else:
+        beamline = DriftZone(l_d / Nstep) * Nstep + \
+                   BendingMag(K1, rho_b, ang_b / Nstep, PoB=False) * Nstep + \
+                   BendingMag(K2, rho_b, ang_b / Nstep, PoB=False) * Nstep + \
+                   BendingMag(K2, rho_b, ang_b / Nstep, PoB=False) * Nstep + \
+                   BendingMag(K1, rho_b, ang_b / Nstep, PoB=False) * Nstep
+
+        beamline = beamline * Nsec
+
+    return beamline
+
 
 def StoredTwissFunc(H, Step):
-
-    def Beamline(horiz=H, NStep=Step):
-
-
-        if horiz:
-            beamline = DriftZone(l_d / NStep) * NStep + \
-                       BendingMag(K1, rho_b, ang_b / NStep, PoB=True) * NStep + \
-                       BendingMag(K2, rho_b, ang_b / NStep, PoB=True) * NStep + \
-                       BendingMag(K2, rho_b, ang_b / NStep, PoB=True) * NStep + \
-                       BendingMag(K1, rho_b, ang_b / NStep, PoB=True) * NStep
-
-            beamline = beamline * 1
-
-        else:
-            beamline = DriftZone(l_d / NStep) * NStep + \
-                       BendingMag(K1, rho_b, ang_b / NStep, PoB=False) * NStep + \
-                       BendingMag(K2, rho_b, ang_b / NStep, PoB=False) * NStep + \
-                       BendingMag(K2, rho_b, ang_b / NStep, PoB=False) * NStep + \
-                       BendingMag(K1, rho_b, ang_b / NStep, PoB=False) * NStep
-
-            beamline = beamline * 1
-
-        return beamline
-
-    BL = Beamline(horiz=H, NStep=Step)
+    BL = Beamline(horiz=H, Nstep=Step)
     twissfunc = Twiss(BL)
-
     return twissfunc
 
 
 NInterpSteps = 20
+
+BL_x = Beamline(horiz=True, Nstep=NInterpSteps)
+BL_y = Beamline(horiz=False, Nstep=NInterpSteps)
 
 Twiss_x = StoredTwissFunc(H=True, Step=NInterpSteps)
 Twiss_y = StoredTwissFunc(H=False, Step=NInterpSteps)
@@ -271,7 +321,7 @@ def TwoBendBetween(s1, s2, horiz=True, Nstep=1):
                    BendingMag(K2, rho_b, ang_b / Nstep, PoB=False) * Nstep + \
                    BendingMag(K2, rho_b, ang_b / Nstep, PoB=False) * Nstep + \
                    BendingMag(K1, rho_b, ang_b / Nstep, PoB=False) * Nstep + \
-                   DriftZone(L=s2/ Nstep) *Nstep
+                   DriftZone(L=s2 / Nstep) * Nstep
 
     return beamline
 
@@ -321,7 +371,7 @@ def EfficientKick():
     ax1 = fig.add_subplot(121)
     ax2 = fig.add_subplot(122)
 
-    cont1 = ax1.contour(S1, S2, OneBendKickEff, levels = list(np.linspace(1.5, 3, 20)))
+    cont1 = ax1.contour(S1, S2, OneBendKickEff, levels=list(np.linspace(1.5, 3, 20)))
 
     ax1.clabel(cont1)
     ax1.set_xlabel('$s_1$ [m]')
@@ -424,17 +474,18 @@ def BeamPass(NBendBetween, s1, s2, Ninterp=10):
 
     FrameNum = (len(BL) * Ninterp) + 2
 
-    ani = matplotlib.animation.FuncAnimation(g.fig, animate, frames= FrameNum)
+    ani = matplotlib.animation.FuncAnimation(g.fig, animate, frames=FrameNum)
 
     plt.show()
     # ani.save('output.gif', writer='pillow')
 
 
-def OptimizePlacement(NBendBetween):
-
+def OptimizePlacement():
     N = 80
     s1_arr = np.linspace(0, l_d - l_kicker, N)
-    s2_arr = np.linspace(0, l_d - l_septum, N)
+    s2_arr = np.concatenate([np.linspace(0, l_d - l_septum, N),
+                             np.linspace(l_d + l_bend, 2 * l_d + l_bend, N),
+                             np.linspace(2 * l_d + 2 * l_bend, 3 * l_d + 2 * l_bend, N)])[-1::-1]
 
     S1, S2 = np.meshgrid(s1_arr, s2_arr)
 
@@ -443,39 +494,29 @@ def OptimizePlacement(NBendBetween):
     SafetyDist = 4e-3
     VacPipe = 2e-3
 
-    DispArr = np.zeros((N, N))
-    T12 = np.zeros((N, N))
+    DispArr = np.zeros((Nsec * N, N))
+    T12 = np.zeros((Nsec * N, N))
 
-    BeamPipeSize = np.zeros((N, N))
-    Midpoint = np.zeros((N, N))
+    BeamPipeSize = np.zeros((Nsec * N, N))
+    Midpoint = np.zeros((Nsec * N, N))
 
-    for i2 in range(N):
+    for i2 in range(Nsec * N):
         for i1 in range(N):
             s1 = s1_arr[i1]
             s2 = s2_arr[i2]
 
-            SBendBetween = {0, 1, 2}
-            if not (NBendBetween in SBendBetween):
-                raise TypeError('NBendBetween can only take on value in {0, 1, 2}')
-            elif NBendBetween == 0:
-                BL = DriftZone(L=(s2 - s1) / NInterpSteps) * NInterpSteps
-            elif NBendBetween == 1:
-                BL = OneBendBetween(s1, s2, horiz=True, Nstep=NInterpSteps)
-                title_text = 'One bending section between the Kicker and the Septum'
-            elif NBendBetween == 2:
-                BL = TwoBendBetween(s1, s2, horiz=True, Nstep=NInterpSteps)
-                title_text = 'Two Bending sections between the Kicker and the Septum'
-
-            T12[i2, i1] = EffTransMat(BL)['TransMat'][0, 1]
+            T12[i2, i1] = TransMatBetweenPoints(s1, s2, BL_x)['TransMat'][-1][0, 1]
 
             Beta_at_Sep = np.interp(s2, Twiss_x['s'], Twiss_x['beta'])
-            DispArr[i2, i1] = SeptumWall + 2 * SafetyDist + 2 * VacPipe + 2 * Nsigma * np.sqrt(emittance * Beta_at_Sep)
+            DispReq = SeptumWall + 2 * SafetyDist + 2 * VacPipe + 2 * Nsigma * np.sqrt(emittance * Beta_at_Sep)
+            DispArr[i2, i1] = DispReq
 
-            NominalTraj = [[0], [0.005]]
+            NominalTraj = np.array([[0],
+                                    [DispReq/(TransMatBetweenPoints(s1, s2, BL_x)['TransMat'][-1][0, 1])]])
 
-            TranspNominalTraj = TransportParticles(NominalTraj, BL)
-            BeamCent = TranspNominalTraj['x'].flatten()
-            BetaFunc = np.interp(TranspNominalTraj['s'], Twiss_x['s'], Twiss_x['beta'])
+            TranspPar = Point_to_Point_ParticleTransport(NominalTraj, s1, s2, BL_x)
+            BeamCent = TranspPar['x']
+            BetaFunc = np.interp(TranspPar['s'], Twiss_x['s'], Twiss_x['beta'])
 
             BeamPipeSize[i2, i1] = np.max(BeamCent + np.sqrt(emittance * BetaFunc))
             Midpoint[i2, i1] = np.max(BeamCent)
@@ -489,7 +530,6 @@ def OptimizePlacement(NBendBetween):
 
     ax1.set_xlabel(r'$s_1$ [m]')
     ax1.set_ylabel(r'$s_2$ [m]')
-    
 
     ax1.set_title("$\kappa= \int B ds$")
 
@@ -498,164 +538,92 @@ def OptimizePlacement(NBendBetween):
     ax2.set_xlabel(r'$s_1$ [m]')
     ax2.set_ylabel(r'$s_2$ [m]')
     ax2.set_title('Min. Beam Pipe size')
-    fig.suptitle(title_text)
 
     fig.tight_layout()
 
     plt.show()
 
+def Optimize():
+    BM_x = BeamMap(BL_x)
 
-OptimizePlacement(1)
+    first_drift = np.logical_and(0 <= BM_x['s'], BM_x['s'] <= l_d)
 
+    bend1 = np.logical_and(l_d <= BM_x['s'], BM_x['s'] <= l_d +l_bend)
+    bend2 = np.logical_and(2 * l_d + l_bend <= BM_x['s'], BM_x['s'] <= 2 * l_d + 2 * l_bend)
+    bend3 = np.logical_and(3 * l_d + 2 * l_bend <= BM_x['s'], BM_x['s'] <= 3 * l_d + 3 * l_bend)
+    bends = np.logical_or(np.logical_or(bend1, bend2), bend3)
+    notbends = np.logical_not(bends)
 
-
-def BeamPipe(NBendBetween):
-    N = 100
-    s1_arr = np.linspace(0, l_d - l_kicker, N)
-    s2_arr = np.linspace(0, l_d - l_septum, N)
-
+    s1_arr = BM_x['s'][first_drift]
+    s2_arr = BM_x['s'][notbends]
     S1, S2 = np.meshgrid(s1_arr, s2_arr)
 
-    BeamPipeSize = np.zeros((N, N))
-    Midpoint = np.zeros((N, N))
-    for i2 in range(N):
-        for i1 in range(N):
-            s1 = s1_arr[i1]
-            s2 = s2_arr[i2]
+    Nsigma = 3
+    SeptumWall = 5e-3
+    SafetyDist = 4e-3
+    VacPipe = 2e-3
 
-            SBendBetween = {0, 1, 2}
-            if not (NBendBetween in SBendBetween):
-                raise TypeError('NBendBetween can only take on value in {0, 1, 2}')
-            elif NBendBetween == 0:
-                BL = DriftZone(L=(s2 - s1) / NInterpSteps) * NInterpSteps
-            elif NBendBetween == 1:
-                BL = OneBendBetween(s1, s2, horiz=True, Nstep=NInterpSteps)
-                title_text = 'One bending section between the Kicker and the Septum'
-            elif NBendBetween == 2:
-                BL = TwoBendBetween(s1, s2, horiz=True, Nstep=NInterpSteps)
-                title_text = 'Two Bending sections between the Kicker and the Septum'
+    DispArr = np.zeros((len(s2_arr) , len(s1_arr)))
+    T12 = np.zeros((len(s2_arr), len(s1_arr)))
 
-            NominalTraj = [[0], [0.005]]
+    BeamPipeSize = np.zeros((len(s2_arr),  len(s1_arr)))
+    Midpoint = np.zeros((len(s2_arr), len(s1_arr)))
 
-            TranspNominalTraj = TransportParticles(NominalTraj, BL)
-            BeamCent = TranspNominalTraj['x'].flatten()
-            BetaFunc = np.interp(TranspNominalTraj['s'], Twiss_x['s'], Twiss_x['beta'])
+    for i2, s2 in enumerate(s2_arr):
+        for i1, s1 in enumerate(s1_arr):
+            KickEff = TransMatBetweenPoints(s1, s2, BL_x)['TransMat'][-1][0, 1]
+            T12[i2, i1] = KickEff
+
+
+            Beta_at_Sep = np.interp(s2, Twiss_x['s'], Twiss_x['beta'])
+            DispReq = SeptumWall + 2 * SafetyDist + 2 * VacPipe + 2 * Nsigma * np.sqrt(emittance * Beta_at_Sep)
+            DispArr[i2, i1] = DispReq
+
+
+            Kick = DispReq/KickEff
+
+
+            Kick = Kick[np.logical_or(Kick != np.inf, Kick != np.nan)]
+
+            NominalTraj = np.array([[0], [Kick]])
+
+            BeamCent = Point_to_Point_ParticleTransport(NominalTraj, s1, s2, BL_x)['x']
+            BetaFunc = np.interp(Point_to_Point_ParticleTransport(NominalTraj, s1, s2, BL_x)['s'],
+                                 Twiss_x['s'], Twiss_x['beta'])
 
             BeamPipeSize[i2, i1] = np.max(BeamCent + np.sqrt(emittance * BetaFunc))
-            Midpoint[i2, i1] = np.max(BeamCent)
-
-    fig = plt.figure('Beampipe')
-    ax = fig.add_subplot(111)
-    c1 = ax.contour(S1, S2, Midpoint, levels=15, cmap='turbo')
-    ax.clabel(c1)
-    ax.set_xlabel(r'$s_1$ [m]')
-    ax.set_ylabel(r'$s_2$ [m]')
-    ax.set_title(title_text)
-
-
-
-
-            # plt.plot(TranspNominalTraj['s'], BeamCent)
-            # plt.show()
-
-            # print('Beam Cent')
-            # print(BeamCent.shape)
-            #
-            # print('beta func')
-            # print(BetaFunc)
 
 
 
 
 
 
-    #         BeamWidth = 3 * np.sqrt(emittance * )
-    #
-    #         BeamPipeSize[i2, i1] = np.max(BeamCent + BeamWidth)
-    #
-    # plt.contourf(S1, S2, BeamPipeSize, cmap = 'turbo')
-    #
-    # plt.colorbar(label='Min Beam Pipe Radius [m]' )
+
+
+
+
+    # plt.imshow(T12)
+    # plt.xticks(s1_arr)
+    # plt.yticks(s2_arr)
     # plt.show()
-    #
-    #
-    #
+    fig = plt.figure()
+    ax1 = fig.add_subplot(121)
+    ax2 = fig.add_subplot()
+    plt.contourf(S1, S2, BeamPipeSize, levels = np.linspace(0, 0.1, 100), cmap = 'turbo')
+    plt.fill_between(s1_arr, l_d, l_d +l_bend, color='k')
+    plt.fill_between(s1_arr, 2*l_d +l_bend, 2*l_d +2*l_bend, color = 'k')
+    plt.fill_between(s1_arr, 3 * l_d + 2 *l_bend, 3 * l_d + 3 * l_bend, color = 'k')
+    plt.xlabel('s1')
+    plt.ylabel('s2')
+    plt.colorbar()
+    plt.show()
+    plt.contourf(S1, S2, DispArr/T12, levels=np.linspace(-0.1, 0.1, 100), cmap='turbo')
+    plt.fill_between(s1_arr, l_d, l_d + l_bend, color='k')
+    plt.fill_between(s1_arr, 2 * l_d + l_bend, 2 * l_d + 2 * l_bend, color='k')
+    plt.fill_between(s1_arr, 3 * l_d + 2 * l_bend, 3 * l_d + 3 * l_bend, color='k')
+    plt.xlabel('s1')
+    plt.ylabel('s2')
+    plt.colorbar()
+    plt.show()
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    #         BeamPipeSize[i2, i1] = np.max(BeamCenter + 2 * nsig * np.sqrt(emittance * Beta_at_Sep))
-    #
-    #
-    #
-    # plt.contour(S1, S2, BeamPipeSize)
-    #
-
-    # fig = plt.figure('IntegratedMagneticField')
-    # ax = fig.add_subplot(111)
-    #
-    #
-    # c = ax.contour(S1, S2, DispArr/T12, levels=list(np.linspace(-1, 1, 300)), cmap='turbo')
-    # cb = fig.colorbar(c, label=r'$\kappa = \int B ds$')
-    #
-    # ax.set_xlabel(r'$s_1$')
-    # ax.set_ylabel(r'$s_2$')
-    # ax.grid()
-
-
-
-
-
-
-
-plt.show()
-
-
-
-    # BeamPipeSize = np.zeros((N, N))
-    # for i2 in range(N):
-    #     for i1 in range(N):
-    #         s1 = s1_arr[i1]
-    #         s2 = s2_arr[i2]
-    #
-    #         SBendBetween = {0, 1, 2}
-    #         if not (NBendBetween in SBendBetween):
-    #             raise TypeError('NBendBetween can only take on value in {0, 1, 2}')
-    #         elif NBendBetween == 0:
-    #             BL = DriftZone(L=(s2 - s1))
-    #         elif NBendBetween == 1:
-    #             BL = OneBendBetween(s1, s2, horiz=True, Nstep=1)
-    #         elif NBendBetween == 2:
-    #             BL = TwoBendBetween(s1, s2, horiz=True, Nstep=1)
-    #
-    #         Twiss_x = Twiss(Section(k1, k2, horiz=True))
-    #
-    #         Beta_at_septum = np.interp(s2, Twiss_x['s'], Twiss_x['beta'])
-    #
-    #         Displacement = SeptumWall + 2 * SafetyDist + 2 * VacPipe + 2 * nsig * np.sqrt(emittance * Beta_at_septum)
-    #
-    #         NominalTraj = [[0], [0]]
-    #         BeamCenter = TransportParticles(NominalTraj, BL)
-    #
-    #         BeamPipeSize[i2, i1] = Displacement + BeamCenter['x'][-1]
-    #
-    # plt.contour(S1, S2, BeamPipeSize)
-    # plt.show()
+Optimize()
